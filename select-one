@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+
+# reads lines from stdin, then launches a curses UI to select a line,
+# then executes a given command replacing '{}' with the line.
+
+import os
+import sys
+import subprocess
+import select
+import time
+import curses
+import traceback
+
+if len(sys.argv) < 2 or "-h" in sys.argv[1]:
+  print("""Usage: seq 0 10 | select-one notify-send "You chose" {}
+""")
+  sys.exit(1)
+
+# start_curses
+os.environ.setdefault('ESCDELAY', '10') # tell curses not to delay when esc hit
+stdscr = None
+selection_lines = []
+selected_line_i = 0
+
+def end_curses():
+  global stdscr
+  curses.nocbreak()
+  stdscr.keypad(False)
+  curses.echo()
+  curses.endwin()
+
+def redraw():
+  global stdscr
+  global selection_lines
+  global selected_line_i
+  stdscr.erase()
+  y, x = stdscr.getmaxyx()
+  begin_offset_i = int(selected_line_i - (y/3))
+  if begin_offset_i < 0:
+    begin_offset_i = 0
+  end_offset_i = int(begin_offset_i + (y-1))
+  if end_offset_i > len(selection_lines):
+    end_offset_i = len(selection_lines)
+  
+  for i in range(begin_offset_i, end_offset_i):
+    if i-begin_offset_i >= (y-1):
+      break
+    line = selection_lines[i]
+    if len(line) >= (x-1):
+      line = line[0:x-2]
+    
+    if i == selected_line_i:
+      stdscr.addstr(i-begin_offset_i, 0, line, curses.color_pair(0) | curses.A_REVERSE)
+    else:
+      stdscr.addstr(i-begin_offset_i, 0, line, curses.color_pair(0))
+  
+  stdscr.refresh()
+
+def add_line(line):
+  global stdscr
+  global selection_lines
+  global selected_line_i
+  selection_lines.append(line)
+
+try:
+  # All this is in a try block to if the proc blows up or I throw
+  # an idex out of bounds or whatever our curses can exit nicely and not
+  # screw up our terminal.
+  
+  for line in sys.stdin:
+    add_line(line)
+  
+  # We have consumed all lines from the piped input
+  
+  # Replace stdin with /dev/tty
+  tty_handle = open("/dev/tty", "r")
+  os.dup2(tty_handle.fileno(), sys.stdin.fileno())
+  
+  stdscr = curses.initscr()
+  curses.noecho()
+  curses.cbreak() # read keys instantly (like arrows)
+  stdscr.keypad(True) # convert raws to things like curses.KEY_LEFT
+  curses.start_color()
+  
+  redraw()
+  
+  while True:
+    c = stdscr.getch()
+    if c in [curses.KEY_ENTER, 10]: # 10 is _my_ enter key, unreliable
+      end_curses()
+      line = selection_lines[selected_line_i].strip()
+      
+      # Print selected line and execute the given program
+      print("%s" % line)
+      
+      # everything after 'select-one'
+      cmd = sys.argv[1:]
+      # now we replace "{}" with 'line'
+      for i in range(0, len(cmd)):
+        if cmd[i] == "{}":
+          cmd[i] = line
+        elif "{}" in cmd[i]:
+          cmd[i] = cmd[i].replace("{}", line)
+      
+      end_curses()
+      subprocess.call(cmd)
+      sys.exit(0)
+      
+      break
+      
+    elif c in [ord('q'), 27]: # 'q' or escape key
+      break
+      
+    elif c in [ord('w'), curses.KEY_UP]:
+      if selected_line_i > 0:
+        selected_line_i -= 1
+        redraw()
+        
+    elif c in [ord('s'), curses.KEY_DOWN]:
+      if selected_line_i < len(selection_lines)-1:
+        selected_line_i += 1
+        redraw()
+    
+    # else: # Uncomment if unsure of a key
+    #  end_curses()
+    #  print("Unhandled char, c = %d" % c)
+    #  break
+  
+except Exception as ex:
+  end_curses() # must end before doing a regular print
+  if ex.code != 0:
+    traceback.print_exc()
+  sys.exit(1)
+
+end_curses()
+
